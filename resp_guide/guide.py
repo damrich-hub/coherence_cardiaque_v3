@@ -1,42 +1,67 @@
-# resp_guide/guide.py
-
 import numpy as np
 
 
 class RespGuideGenerator:
     """
-    Génère une respiration guidée sinusoïdale
-    avec une phase interne qui avance au cours du temps.
+    Génère une respiration guidée basée sur un cycle inspi/expi
+    avec montée sur 'insp_duration' secondes et descente sur
+    'exp_duration' secondes, parfaitement synchronisée.
     """
 
-    def __init__(self, insp=4, exp=6):
-        self.insp = insp
-        self.exp = exp
-        self.phase = 0.0      # secondes
-        self.dt = 0.05        # pas de temps pour step() ~ 20 Hz
+    def __init__(self, insp_duration=4.0, exp_duration=6.0):
+        self.insp = insp_duration
+        self.exp = exp_duration
+        self.phase = 0.0     # phase dans le cycle (secondes)
+        self.dt = 0.2        # pas de temps nominal (lié au refresh)
 
+    # -------------------------------------------------------
     def set_durations(self, insp, exp):
-        self.insp = max(1, float(insp))
-        self.exp = max(1, float(exp))
+        """Met à jour les durées du cycle."""
+        self.insp = max(0.5, float(insp))
+        self.exp = max(0.5, float(exp))
 
+    # -------------------------------------------------------
     def step(self):
-        """Avance d'un pas de temps pour animer la respiration."""
-        self.phase += self.dt
-        T = self.insp + self.exp
-        if T <= 0:
-            T = 1.0
-        self.phase = self.phase % T
+        """Avance la phase d'un pas de dt, en boucle."""
+        total = self.insp + self.exp
+        self.phase = (self.phase + self.dt) % total
 
-    def generate_waveform(self, duration=10.0):
+    # -------------------------------------------------------
+    def generate_waveform(self):
         """
-        Retourne (t, y) pour tracer la respiration guidée.
-        y va de -1 à +1 environ.
+        Génère la courbe complète d'un cycle pour l'affichage :
+        - montée linéaire ou sinusoïdale sur phase inspi
+        - descente sur phase expi
         """
-        T = self.insp + self.exp
-        if T <= 0:
-            T = 1.0
+        total = self.insp + self.exp
 
-        t = np.linspace(0, duration, 400)
-        y = np.sin(2 * np.pi * (t + self.phase) / T)
+        # 100 points par cycle → propre pour l'affichage
+        t = np.linspace(0, total, 200)
+
+        y = np.zeros_like(t)
+
+        # Inspir : 0 → +1
+        mask_insp = t < self.insp
+        x_insp = t[mask_insp] / self.insp
+        y[mask_insp] = np.sin(x_insp * np.pi / 2)   # montée douce
+
+        # Expi : +1 → -1
+        mask_exp = t >= self.insp
+        x_exp = (t[mask_exp] - self.insp) / self.exp
+        y[mask_exp] = np.cos(x_exp * np.pi)         # descend de +1 à -1
 
         return t, y
+
+    # -------------------------------------------------------
+    def get_instant_value(self):
+        """
+        Donne la valeur Y instantanée de la respiration guidée,
+        utile si tu veux synchroniser un point mobile.
+        """
+        if self.phase < self.insp:
+            x = self.phase / self.insp
+            return np.sin(x * np.pi / 2)
+        else:
+            x = (self.phase - self.insp) / self.exp
+            return np.cos(x * np.pi)
+
