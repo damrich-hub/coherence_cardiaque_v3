@@ -1,204 +1,213 @@
-# -*- coding: utf-8 -*-
-import math
+# app/main_window.py
+
+import numpy as np
 from PySide6 import QtCore, QtWidgets
-
-import matplotlib
-matplotlib.use("qtagg")
-from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
+from pipeline.processor import Processor
+from ble.ble_worker import BLEWorker
+from resp_guide.guide import RespGuideGenerator
 
 
+# ----------------------------------------------------------------------
+# Petit wrapper Matplotlib
+# ----------------------------------------------------------------------
 class MplCanvas(FigureCanvasQTAgg):
-    def __init__(self, width=5, height=4, dpi=100):
+    def __init__(self, width=5, height=2, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
         super().__init__(self.fig)
 
 
+# ----------------------------------------------------------------------
+# FENÊTRE PRINCIPALE
+# ----------------------------------------------------------------------
 class MainWindow(QtWidgets.QMainWindow):
-    """
-    Version simplifiée et cohérente avec ton architecture actuelle.
-    - pas de respiration réelle EDR
-    - respiration guidée OK
-    - Processor OK
-    - BLE OK
-    """
-
-    def __init__(self, ble_worker, processor, resp_guide):
+    def __init__(self):
         super().__init__()
 
         self.setWindowTitle("Cohérence Cardiaque – V3 Stable")
-        self.resize(1200, 700)
+        self.resize(1280, 720)
 
-        self.ble = ble_worker
-        self.processor = processor
-        self.resp_guide = resp_guide
+        # === HRV Processor ===
+        self.processor = Processor()
 
-        self._build_ui()
-        self._connect_signals()
+        # === Respiration guidée ===
+        self.resp_guide = RespGuideGenerator()
 
-        # timer UI
+        # === BLE (simulation RR) ===
+        self.ble = BLEWorker()
+        self.ble.new_rr_signal.connect(self.on_new_rr)
+        self.ble.status_signal.connect(self.on_ble_status)
+
+        # === UI ===
+        self.build_ui()
+
+        # === Timer UI ===
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.refresh_ui)
-        self.timer.start(80)
+        self.timer.start(200)  # 5 Hz
 
-    # ------------------------------------------------------------
-    # UI
-    # ------------------------------------------------------------
-    def _build_ui(self):
+        # === Lancer simulation BLE ===
+        self.ble.start()
+
+    # ------------------------------------------------------------------
+    # RÉCEPTION RR BLE
+    # ------------------------------------------------------------------
+    def on_new_rr(self, rr_value: int):
+        self.processor.push_rr(rr_value)
+
+    def on_ble_status(self, txt: str):
+        self.lbl_ble.setText(f"BLE : {txt}")
+
+    # ------------------------------------------------------------------
+    # Interface principale
+    # ------------------------------------------------------------------
+    def build_ui(self):
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
         layout = QtWidgets.QHBoxLayout(central)
+        self.setCentralWidget(central)
 
-        # ------------------------------
-        # Left: RR + Spectre + Guide
-        # ------------------------------
+        # --------------------------------------------------------------
+        # COLONNE GAUCHE (3 graphes)
+        # --------------------------------------------------------------
         left = QtWidgets.QVBoxLayout()
-        layout.addLayout(left, stretch=2)
 
-        # RR graph
-        self.can_rr = MplCanvas(width=6, height=2.5)
+        # === Graphe RR ===
+        self.can_rr = MplCanvas()
         self.ax_rr = self.can_rr.fig.add_subplot(111)
         self.ax_rr.set_title("RR (ms)")
         self.ax_rr.grid(True, alpha=0.3)
-        (self.line_rr,) = self.ax_rr.plot([], [], lw=1.4)
-        self.ax_rr.set_ylim(600, 1200)
-        self.ax_rr.set_xlim(0, 60)
+        self.line_rr, = self.ax_rr.plot([], [], lw=1.4)
         left.addWidget(self.can_rr)
 
-        # Spectre HRV
-        self.can_spec = MplCanvas(width=6, height=2.5)
+        # === Spectre HRV ===
+        self.can_spec = MplCanvas()
         self.ax_spec = self.can_spec.fig.add_subplot(111)
         self.ax_spec.set_title("Spectre HRV")
         self.ax_spec.grid(True, alpha=0.3)
-        (self.line_spec,) = self.ax_spec.plot([], [], lw=1.4)
-        self.ax_spec.set_xlim(0, 0.5)
-        self.ax_spec.set_ylim(0, 1)
+        self.line_spec, = self.ax_spec.plot([], [], lw=1.4)
         left.addWidget(self.can_spec)
 
-        # Guide respiration
-        self.can_guide = MplCanvas(width=6, height=2.2)
-        self.ax_guide = self.can_guide.fig.add_subplot(111)
-        self.ax_guide.set_title("Respiration guidée")
-        self.ax_guide.grid(True, alpha=0.3)
-        (self.line_guide,) = self.ax_guide.plot([], [], lw=1.4, color="green")
-        self.ax_guide.set_xlim(0, 10)
-        self.ax_guide.set_ylim(-1.2, 1.2)
-        left.addWidget(self.can_guide)
+        # === Respiration guidée + estimée ===
+        self.can_resp = MplCanvas()
+        self.ax_resp = self.can_resp.fig.add_subplot(111)
+        self.ax_resp.set_title("Respiration")
+        self.ax_resp.grid(True, alpha=0.3)
 
-        # ------------------------------
-        # Right : Sliders + Stats
-        # ------------------------------
+        # Courbe verte (resp guidée)
+        self.line_resp, = self.ax_resp.plot([], [], lw=1.8, color="green")
+        # Courbe orange (resp estimée)
+        self.line_resp_est, = self.ax_resp.plot([], [], lw=1.5, color="orange")
+
+        left.addWidget(self.can_resp)
+
+        layout.addLayout(left)
+
+        # --------------------------------------------------------------
+        # COLONNE DROITE (sliders + infos)
+        # --------------------------------------------------------------
         right = QtWidgets.QVBoxLayout()
-        layout.addLayout(right, stretch=1)
 
-        # sliders respiration
-        box_sliders = QtWidgets.QGroupBox("Respiration guidée")
-        l = QtWidgets.QVBoxLayout(box_sliders)
+        # === BLE status ===
+        self.lbl_ble = QtWidgets.QLabel("BLE : —")
+        font = self.lbl_ble.font()
+        font.setPointSize(11)
+        font.setBold(True)
+        self.lbl_ble.setFont(font)
+        right.addWidget(self.lbl_ble)
 
-        self.slide_insp = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slide_insp.setRange(2, 10)
-        self.slide_insp.setValue(4)
+        # === Sliders respiration guidée ===
+        right.addWidget(QtWidgets.QLabel("Respiration guidée"))
 
-        self.slide_exp = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.slide_exp.setRange(2, 10)
-        self.slide_exp.setValue(6)
+        self.sl_insp = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl_insp.setMinimum(2)
+        self.sl_insp.setMaximum(10)
+        self.sl_insp.setValue(4)
+        right.addWidget(QtWidgets.QLabel("Inspiration (s)"))
+        right.addWidget(self.sl_insp)
 
-        l.addWidget(QtWidgets.QLabel("Inspiration (s)"))
-        l.addWidget(self.slide_insp)
-        l.addWidget(QtWidgets.QLabel("Expiration (s)"))
-        l.addWidget(self.slide_exp)
+        self.sl_exp = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl_exp.setMinimum(2)
+        self.sl_exp.setMaximum(12)
+        self.sl_exp.setValue(6)
+        right.addWidget(QtWidgets.QLabel("Expiration (s)"))
+        right.addWidget(self.sl_exp)
 
-        right.addWidget(box_sliders)
+        # === HRV Infos ===
+        right.addWidget(QtWidgets.QLabel("Indicateurs HRV"))
 
-        # stats affichées
-        box_stats = QtWidgets.QGroupBox("Indicateurs HRV")
-        ls = QtWidgets.QFormLayout(box_stats)
+        self.lbl_rmssd = QtWidgets.QLabel("RMSSD : 0")
+        self.lbl_lf = QtWidgets.QLabel("LF : 0")
+        self.lbl_hf = QtWidgets.QLabel("HF : 0")
+        self.lbl_ratio = QtWidgets.QLabel("LF/HF : 0")
+        self.lbl_resp = QtWidgets.QLabel("Resp (Hz) : 0")
+        self.lbl_score = QtWidgets.QLabel("Score : 0")
 
-        self.lbl_rmssd = QtWidgets.QLabel("0")
-        self.lbl_lf = QtWidgets.QLabel("0")
-        self.lbl_hf = QtWidgets.QLabel("0")
-        self.lbl_ratio = QtWidgets.QLabel("0")
-        self.lbl_breath = QtWidgets.QLabel("0")
-        self.lbl_score = QtWidgets.QLabel("0")
+        right.addWidget(self.lbl_rmssd)
+        right.addWidget(self.lbl_lf)
+        right.addWidget(self.lbl_hf)
+        right.addWidget(self.lbl_ratio)
+        right.addWidget(self.lbl_resp)
+        right.addWidget(self.lbl_score)
 
-        ls.addRow("RMSSD :", self.lbl_rmssd)
-        ls.addRow("LF :", self.lbl_lf)
-        ls.addRow("HF :", self.lbl_hf)
-        ls.addRow("LF/HF :", self.lbl_ratio)
-        ls.addRow("Resp (Hz) :", self.lbl_breath)
-        ls.addRow("Score :", self.lbl_score)
+        layout.addLayout(right)
 
-        right.addWidget(box_stats)
+    # ------------------------------------------------------------------
+    # Mise à jour du graphique de respiration guidée
+    # ------------------------------------------------------------------
+    def update_resp_guided_plot(self, t, y):
+        self.line_resp.set_data(t, y)
+        if len(t) > 1:
+            self.ax_resp.set_xlim(0, t[-1])
+        self.ax_resp.set_ylim(-1.2, 1.2)
+        self.can_resp.draw()
 
-        right.addStretch()
-
-    # ------------------------------------------------------------
-    # SIGNALS
-    # ------------------------------------------------------------
-    def _connect_signals(self):
-        self.ble.new_rr_signal.connect(self._on_new_rr)
-
-    def _on_new_rr(self, rr_value):
-        """ Nouveau RR venant du BLE """
-        self.processor.add_rr(rr_value)
-
-    # ------------------------------------------------------------
-    # REFRESH UI
-    # ------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Rafraîchissement UI
+    # ------------------------------------------------------------------
     def refresh_ui(self):
-        """
-        Rafraîchit uniquement :
-        - RR
-        - spectre
-        - respiration guidée
-        - stats HRV (ProcessorState)
-        """
 
-        # -----------------------------
-        # respiration guidée
-        # -----------------------------
-        insp = self.slide_insp.value()
-        exp = self.slide_exp.value()
+        # === Avancer respiration guidée ===
+        self.resp_guide.step()
+        insp = self.sl_insp.value()
+        exp = self.sl_exp.value()
+        self.resp_guide.set_durations(insp, exp)
+        t, y = self.resp_guide.generate_waveform()
+        self.update_resp_guided_plot(t, y)
 
-        self.resp_guide.set_times(insp, exp)
-        t, y = self.resp_guide.generate_wave()
-
-        self.line_guide.set_data(t, y)
-        self.ax_guide.set_xlim(0, max(t) if len(t) > 0 else 10)
-        self.can_guide.draw()
-
-        # -----------------------------
-        # calculs HRV
-        # -----------------------------
+        # === Process HRV ===
         state = self.processor.compute_state()
-        if state is None:
-            return
 
-        # -----------------------------
-        # update RR graph
-        # -----------------------------
-        rr = self.processor.rr_history
-        if len(rr) > 2:
-            self.line_rr.set_data(range(len(rr)), rr)
-            self.ax_rr.set_xlim(0, len(rr))
+        # --- RR graph ---
+        if len(state.rr_list) > 2:
+            x = np.arange(len(state.rr_list))
+            self.line_rr.set_data(x, state.rr_list)
+            self.ax_rr.set_xlim(0, len(state.rr_list))
+            self.ax_rr.set_ylim(min(state.rr_list) - 50,
+                                max(state.rr_list) + 50)
             self.can_rr.draw()
 
-        # -----------------------------
-        # update HRV spectrum
-        # -----------------------------
-        if state.spec_freq is not None and state.spec_power is not None:
-            self.line_spec.set_data(state.spec_freq, state.spec_power)
+        # --- Spectre ---
+        if len(state.freq) > 2:
+            self.line_spec.set_data(state.freq, state.power)
             self.ax_spec.set_xlim(0, 0.5)
-            if len(state.spec_power) > 0:
-                self.ax_spec.set_ylim(0, max(state.spec_power) * 1.2)
+            self.ax_spec.set_ylim(0, max(state.power) * 1.1)
             self.can_spec.draw()
 
-        # -----------------------------
-        # update labels
-        # -----------------------------
-        self.lbl_rmssd.setText(f"{state.rmssd:.1f}")
-        self.lbl_lf.setText(f"{state.lf:.3f}")
-        self.lbl_hf.setText(f"{state.hf:.3f}")
-        self.lbl_ratio.setText(f"{state.lf_hf_ratio:.3f}")
-        self.lbl_breath.setText(f"{state.resp_freq:.3f}")
-        self.lbl_score.setText(f"{state.score:.1f}")
+        # --- HRV Infos ---
+        self.lbl_rmssd.setText(f"RMSSD : {state.rmssd:.1f}")
+        self.lbl_lf.setText(f"LF : {state.lf:.3f}")
+        self.lbl_hf.setText(f"HF : {state.hf:.3f}")
+        self.lbl_ratio.setText(f"LF/HF : {state.lf_hf_ratio:.3f}")
+        self.lbl_resp.setText(f"Resp (Hz) : {state.resp_freq:.3f}")
+        self.lbl_score.setText(f"Score : {state.score:.1f}")
+
+        # --- Respiration estimée (orange) ---
+        if state.resp_signal is not None and len(state.resp_signal) > 2:
+            self.line_resp_est.set_data(state.resp_time, state.resp_signal)
+            self.ax_resp.set_xlim(min(state.resp_time),
+                                  max(state.resp_time))
+            self.ax_resp.set_ylim(min(state.resp_signal),
+                                  max(state.resp_signal))
+            self.can_resp.draw()

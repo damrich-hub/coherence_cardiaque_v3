@@ -1,56 +1,40 @@
 # ble/ble_worker.py
-# -----------------
-# Version simple : génère des intervalles RR simulés.
-# Objectif : avoir une source de données stable pour tester
-# l’UI et le pipeline sans s’occuper du BLE réel.
-#
-# Plus tard, on pourra réintroduire la logique Polar H10
-# (Bleak, UUID, etc.) dans cette même classe.
 
-from PySide6 import QtCore
 import random
+from PySide6 import QtCore
 
 
 class BLEWorker(QtCore.QObject):
     """
-    Générateur simple de RR simulés.
-
-    new_rr_signal : émet un RR en millisecondes (int)
-    toutes les secondes environ.
+    Simulation BLE :
+      - génère des RR aléatoires autour de 800 ms
+      - émet un signal de statut pour l'UI
     """
 
     new_rr_signal = QtCore.Signal(int)
+    status_signal = QtCore.Signal(str)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.generate_rr)
 
-        self._timer = QtCore.QTimer(self)
-        self._timer.setInterval(1000)  # 1 RR / seconde
-        self._timer.timeout.connect(self._emit_fake_rr)
-
-        # On démarre tout de suite la simulation
-        self._timer.start()
-
-    # --------------------------------------------------
-    # API minimale (start/stop) si tu veux contrôler
-    # depuis main.py ou un bouton plus tard.
-    # --------------------------------------------------
     def start(self):
-        if not self._timer.isActive():
-            self._timer.start()
+        """Démarre la simulation."""
+        self.status_signal.emit("Simulation active")
+        self.timer.start(600)   # ~100 bpm simulés
 
     def stop(self):
-        if self._timer.isActive():
-            self._timer.stop()
+        """Arrête la simulation."""
+        self.status_signal.emit("Arrêt")
+        self.timer.stop()
 
-    # --------------------------------------------------
-    # Génération RR factice
-    # --------------------------------------------------
-    def _emit_fake_rr(self):
+    def generate_rr(self):
         """
-        Génère un RR autour de 800 ms avec un peu de bruit.
+        Génère un RR réaliste :
+        800 ms ± 60 ms, jamais en dessous de 500 ms.
         """
-        base_rr = 800  # ms
-        jitter = random.randint(-60, 60)
-        rr = base_rr + jitter
-        self.new_rr_signal.emit(int(rr))
+        base_rr = 800
+        noise = random.randint(-60, 60)
+        rr = max(500, base_rr + noise)
+        self.new_rr_signal.emit(rr)

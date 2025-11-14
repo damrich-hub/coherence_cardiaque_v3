@@ -1,222 +1,117 @@
 # pipeline/processor.py
-# ---------------------
-# Pipeline HRV simplifié, sans respiration réelle (EDR).
-#
-# Utilise :
-#   - hrv.time_domain.compute_time_domain(rr_ms)
-#   - hrv.spectral.compute_spectral(rr_ms)
-#
-# Renvoie un ProcessorState contenant :
-#   rmssd, lf, hf, lf_hf_ratio, resp_freq, score,
-#   spec_freq, spec_power
-#
-# NOTE : la fonction compute_spectral peut retourner
-#   soit un dict, soit un tuple ; on gère les deux cas.
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from collections import deque
-import math
-from typing import Deque, Optional, Sequence
 
 import numpy as np
+from dataclasses import dataclass
 
 from hrv.time_domain import compute_time_domain
 from hrv.spectral import compute_spectral
 
 
+# ----------------------------------------------------------------------
+# ProcessorState : état complet envoyé à l'UI
+# ----------------------------------------------------------------------
 @dataclass
 class ProcessorState:
-    # time-domain
-    rmssd: float = 0.0
+    rr_list: list
+    rmssd: float
+    lf: float
+    hf: float
+    lf_hf_ratio: float
+    resp_freq: float
+    freq: np.ndarray
+    power: np.ndarray
+    score: float
 
-    # spectral
-    lf: float = 0.0
-    hf: float = 0.0
-    lf_hf_ratio: float = 0.0
-    resp_freq: float = 0.0  # fréquence respiratoire estimée (Hz)
-
-    # score global (0..100)
-    score: float = 0.0
-
-    # spectre complet pour l’affichage
-    spec_freq: Optional[np.ndarray] = None
-    spec_power: Optional[np.ndarray] = None
+    # Respiration estimée (RSA / EDR)
+    resp_signal: np.ndarray = None
+    resp_time: np.ndarray = None
 
 
+# ----------------------------------------------------------------------
+# Processor : cœur du traitement HRV
+# ----------------------------------------------------------------------
 class Processor:
-    """
-    Gère l’historique RR et calcule périodiquement un ProcessorState.
+    def __init__(self, max_window=300):  # ~ 300 RR ≈ 4 minutes
+        self.rr_list = []
+        self.max_window = max_window
 
-    API utilisée par MainWindow :
-        - add_rr(rr_ms: float)
-        - compute_state() -> ProcessorState
-        - rr_history : séquence des RR ms
-    """
+    # --------------------------------------------------------------
+    def push_rr(self, rr):
+        """Ajoute un RR et maintient une fenêtre glissante."""
+        self.rr_list.append(int(rr))
 
-    def __init__(
-        self,
-        window_sec: int = 120,
-        rr_min: int = 300,
-        rr_max: int = 2000,
-        approx_fs: float = 4.0,
-    ):
-        """
-        window_sec  : durée approx de la fenêtre RR (en secondes)
-        rr_min/max  : bornes de filtrage des RR aberrants
-        approx_fs   : fréquence d’échantillonnage supposée (Hz)
-        """
-        # hypothèse : ~2 battements / s → maxlen = window_sec * 2
-        self.rr_history: Deque[float] = deque(maxlen=window_sec * 2)
-        self._rr_min = rr_min
-        self._rr_max = rr_max
-        self._fs = approx_fs
+        # fenêtre glissante (max 4 minutes)
+        if len(self.rr_list) > self.max_window:
+            self.rr_list = self.rr_list[-self.max_window:]
 
-        self.state = ProcessorState()
-
-    # --------------------------------------------------
-    # Données d’entrée
-    # --------------------------------------------------
-    def add_rr(self, rr_ms: float) -> None:
-        """
-        Ajoute un intervalle RR (en millisecondes), avec filtrage simple.
-        """
-        if rr_ms <= 0:
-            return
-        if rr_ms < self._rr_min or rr_ms > self._rr_max:
-            # on ignore les outliers grossiers
-            return
-
-        self.rr_history.append(float(rr_ms))
-
-    # --------------------------------------------------
-    # Calcul de l’état
-    # --------------------------------------------------
+    # --------------------------------------------------------------
     def compute_state(self) -> ProcessorState:
-        """
-        Calcule les métriques HRV à partir de rr_history.
+        """Calcule tous les indicateurs HRV + spectre + score + respiration estimée."""
+        rr = self.rr_list
 
-        Peut être appelé fréquemment par l’UI ; si les données sont
-        insuffisantes, on renvoie l’état courant (principalement des zéros).
-        """
-        if len(self.rr_history) < 10:
-            # pas assez de données pour une HRV fiable
-            return self.state
+        # Cas de base si pas assez de données
+        if len(rr) < 4:
+            return ProcessorState(
+                rr_list=rr,
+                rmssd=0.0,
+                lf=0.0,
+                hf=0.0,
+                lf_hf_ratio=0.0,
+                resp_freq=0.0,
+                freq=np.array([]),
+                power=np.array([]),
+                score=0.0,
+                resp_signal=np.array([]),
+                resp_time=np.array([]),
+            )
 
-        rr = np.array(self.rr_history, dtype=float)
+        # ====== 1) TIME DOMAIN ======
+        td = compute_time_domain(rr)
+        rmssd = td.get("rmssd", 0.0)
 
-        # -----------------------------
-        # Domaine temporel
-        # -----------------------------
-        try:
-            td = compute_time_domain(rr)
-            rmssd = float(td.get("rmssd", 0.0))
-        except Exception:
-            rmssd = 0.0
+        # ====== 2) SPECTRAL ======
+        spec = compute_spectral(rr)
 
-        # -----------------------------
-        # Domaine fréquentiel
-        # -----------------------------
-        lf = hf = peak_hf = 0.0
-        freq = power = None
-
-        try:
-            spec_res = compute_spectral(rr)
-
-            # Cas 1 : dict
-            if isinstance(spec_res, dict):
-                freq = np.asarray(spec_res.get("freq")) if spec_res.get("freq") is not None else None
-                power = np.asarray(spec_res.get("power")) if spec_res.get("power") is not None else None
-                lf = float(spec_res.get("lf", 0.0))
-                hf = float(spec_res.get("hf", 0.0))
-                peak_hf = float(spec_res.get("peak_hf", 0.0))
-
-            # Cas 2 : tuple/list
-            elif isinstance(spec_res, (tuple, list)) and len(spec_res) >= 2:
-                freq = np.asarray(spec_res[0]) if spec_res[0] is not None else None
-                power = np.asarray(spec_res[1]) if spec_res[1] is not None else None
-                if len(spec_res) >= 4:
-                    lf = float(spec_res[2])
-                    hf = float(spec_res[3])
-                if len(spec_res) >= 5:
-                    peak_hf = float(spec_res[4])
-
-        except Exception:
-            # en cas d’erreur, on laisse les valeurs à 0 / None
-            pass
-
-        # Ratio LF/HF
-        if hf > 1e-9:
-            ratio = lf / hf
+        if spec["freq"] is not None:
+            freq = spec["freq"]
+            power = spec["power"]
+            lf = spec["lf"]
+            hf = spec["hf"]
+            ratio = lf / hf if hf > 1e-9 else 0.0
+            resp_freq = spec.get("peak_hf", 0.0)
         else:
-            ratio = 0.0
+            freq = np.array([])
+            power = np.array([])
+            lf = hf = ratio = resp_freq = 0.0
 
-        # Fréquence respiratoire estimée
-        resp_freq = peak_hf if peak_hf > 0 else 0.0
+        # ====== 3) SCORE SIMPLE ======
+        score = float(min(100.0, rmssd / 3.0 * 100.0))
 
-        # -----------------------------
-        # Score global (0..100)
-        # -----------------------------
-        score = self._compute_score(rmssd, lf, hf, ratio, resp_freq)
+        # ====== 4) RESPIRATION ESTIMÉE (RSA / EDR) ======
 
-        # -----------------------------
-        # Mise à jour de l’état
-        # -----------------------------
-        self.state = ProcessorState(
+        # Variation des RR : c’est la base du RSA
+        rr_array = np.array(rr)
+        rr_diff = rr_array - np.mean(rr_array)
+
+        # Normalisation pour tracer
+        if len(rr_diff) > 4:
+            resp_signal = rr_diff / (np.max(np.abs(rr_diff)) + 1e-9)
+        else:
+            resp_signal = np.array([])
+
+        resp_time = np.arange(len(resp_signal))
+
+        # Retour complet
+        return ProcessorState(
+            rr_list=rr,
             rmssd=rmssd,
             lf=lf,
             hf=hf,
             lf_hf_ratio=ratio,
             resp_freq=resp_freq,
+            freq=freq,
+            power=power,
             score=score,
-            spec_freq=freq,
-            spec_power=power,
+            resp_signal=resp_signal,
+            resp_time=resp_time,
         )
-
-        return self.state
-
-    # --------------------------------------------------
-    # Score global (très simple mais stable)
-    # --------------------------------------------------
-    def _compute_score(
-        self,
-        rmssd: float,
-        lf: float,
-        hf: float,
-        ratio: float,
-        resp_freq: float,
-    ) -> float:
-        """
-        Combinaison très simple de trois composantes :
-        - ratio LF/HF proche de 1
-        - RMSSD "suffisant"
-        - respiration autour de 0.1 Hz (~6 cpm)
-
-        Renvoie un score entre 0 et 100.
-        """
-
-        # RMSSD : normaliser avec plafond ~80 ms
-        rmssd_norm = max(0.0, min(rmssd / 80.0, 1.0))
-
-        # Ratio LF/HF : optimum autour de 1 (0.5–2)
-        if hf <= 0 or lf <= 0:
-            ratio_norm = 0.0
-        else:
-            r = max(ratio, 1e-8)
-            # plus r est proche de 1, plus le score est bon
-            ratio_norm = 1.0 - min(abs(math.log10(r)), 1.0)
-            ratio_norm = max(0.0, min(ratio_norm, 1.0))
-
-        # Respiration : maximum à 0.1 Hz (6 respirations/min)
-        if resp_freq <= 0:
-            resp_norm = 0.0
-        else:
-            # distance relative à 0.1 Hz, tolérance ±0.05 Hz
-            diff = abs(resp_freq - 0.1)
-            resp_norm = 1.0 - min(diff / 0.05, 1.0)
-            resp_norm = max(0.0, resp_norm)
-
-        # pondération simple
-        score_0_1 = 0.4 * ratio_norm + 0.3 * rmssd_norm + 0.3 * resp_norm
-        return float(max(0.0, min(score_0_1, 1.0)) * 100.0)
