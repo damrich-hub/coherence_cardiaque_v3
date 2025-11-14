@@ -1,86 +1,99 @@
-# hrv/spectral.py
-"""
-Analyse spectrale HRV – méthode Welch (LF / HF / ratio).
-
-Fonction principale :
-- compute_spectral(rr_intervals_ms) -> (lf, hf, ratio)
-"""
-
-from __future__ import annotations
-
-from typing import Iterable, Tuple
-
 import numpy as np
 from scipy.signal import welch
+from typing import Iterable, Dict, Optional
 
-from .utils import detrend_signal
-
-# Bandes standard HF/LF en Hz
 LF_BAND = (0.04, 0.15)
 HF_BAND = (0.15, 0.40)
-
-# Fréquence d’échantillonnage après interpolation (Hz)
-FS = 4.0
+FS = 4.0  # fréquence d'échantillonnage interpolée
 
 
-def compute_spectral(rr_intervals_ms: Iterable[float]) -> Tuple[float, float, float]:
+def detrend_signal(x: np.ndarray) -> np.ndarray:
+    """Supprime la tendance linéaire pour améliorer le spectre."""
+    return x - np.mean(x)
+
+
+def _band_power(freqs, psd, band):
+    mask = (freqs >= band[0]) & (freqs <= band[1])
+    if not np.any(mask):
+        return 0.0
+    return np.trapz(psd[mask], freqs[mask])
+
+
+def compute_spectral(rr_intervals_ms: Iterable[float]) -> Dict[str, Optional[float]]:
     """
-    Calcule les puissances LF, HF et le ratio LF/HF à partir des intervalles RR.
-
-    Parameters
-    ----------
-    rr_intervals_ms : Iterable[float]
-        Intervalles RR en millisecondes.
-
-    Returns
-    -------
-    lf : float
-    hf : float
-    ratio : float
+    Calcule un spectre HRV complet.
+    Retourne un dict :
+      {
+        "freq": ndarray,
+        "power": ndarray,
+        "lf": float,
+        "hf": float,
+        "peak_hf": float
+      }
     """
     rr_list = list(rr_intervals_ms)
-    if len(rr_list) < 10:
-        return 0.0, 0.0, 0.0
+    n = len(rr_list)
 
-    # Convertir en secondes
+    if n < 10:
+        return {
+            "freq": None,
+            "power": None,
+            "lf": 0.0,
+            "hf": 0.0,
+            "peak_hf": 0.0,
+        }
+
+    # Converti en secondes
     rr = np.asarray(rr_list, dtype=float) / 1000.0
 
-    # Temps cumulé
+    # Axe temporel cumulé
     t = np.cumsum(rr) - rr[0]
     if t[-1] <= 0:
-        return 0.0, 0.0, 0.0
+        return {
+            "freq": None,
+            "power": None,
+            "lf": 0.0,
+            "hf": 0.0,
+            "peak_hf": 0.0,
+        }
 
-    # Interpolation régulière
+    # Interpolation uniforme
     t_uniform = np.arange(0, t[-1], 1.0 / FS)
-    if t_uniform.size < 4:
-        return 0.0, 0.0, 0.0
+    if t_uniform.size < 8:
+        return {
+            "freq": None,
+            "power": None,
+            "lf": 0.0,
+            "hf": 0.0,
+            "peak_hf": 0.0,
+        }
 
     rr_uniform = np.interp(t_uniform, t, rr)
 
-    # Détrending léger
+    # Detrend
     rr_uniform = detrend_signal(rr_uniform)
 
-    # Welch
+    # PSD de Welch
     nperseg = min(256, len(rr_uniform))
-    if nperseg < 16:
-        return 0.0, 0.0, 0.0
-
     freqs, psd = welch(rr_uniform, fs=FS, nperseg=nperseg)
 
-    # Intégration des bandes
-    lf = _band_power(freqs, psd, LF_BAND)
-    hf = _band_power(freqs, psd, HF_BAND)
+    # Puissances LF / HF
+    lf = float(_band_power(freqs, psd, LF_BAND))
+    hf = float(_band_power(freqs, psd, HF_BAND))
 
-    ratio = lf / hf if hf > 1e-12 else 0.0
+    # Pic HF = fréquence respiratoire
+    mask_hf = (freqs >= HF_BAND[0]) & (freqs <= HF_BAND[1])
+    if np.any(mask_hf):
+        idx = np.argmax(psd[mask_hf])
+        peak_hf = float(freqs[mask_hf][idx])
+    else:
+        peak_hf = 0.0
 
-    return float(lf), float(hf), float(ratio)
-
-
-def _band_power(freqs: np.ndarray, psd: np.ndarray, band) -> float:
-    """Intègre la puissance du PSD dans une bande donnée."""
-    fmin, fmax = band
-    mask = (freqs >= fmin) & (freqs <= fmax)
-    if not np.any(mask):
-        return 0.0
-    return float(np.trapz(psd[mask], freqs[mask]))
+    return {
+        "freq": freqs,
+        "power": psd,
+        "lf": lf,
+        "hf": hf,
+        "peak_hf": peak_hf,
+    }
 
