@@ -1,0 +1,11 @@
+/* styles.qss
+   Style global de l’application.
+*/
+
+QMainWindow {
+    background: #f7f7f7;
+}
+
+QLabel {
+    font-size: 14px;
+}
